@@ -29,9 +29,10 @@ from datetime import datetime
 from pathlib import Path
 from timeit import default_timer
 from traceback import format_stack
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Iterable
 
 import numpy as np
+import psutil
 
 if sys.platform == "win32":
     DUMPCAP = r"C:\Program Files\Wireshark\dumpcap.exe"
@@ -56,13 +57,13 @@ Z_AXIS = 4
 D_AXIS = 8
 
 # error codes
-LIBUM_NO_ERROR = 0  # No error
-LIBUM_OS_ERROR = -1  # Operating System level error
-LIBUM_NOT_OPEN = -2  # Communication socket not open
-LIBUM_TIMEOUT = -3  # Timeout occurred
-LIBUM_INVALID_ARG = -4  # Illegal command argument
-LIBUM_INVALID_DEV = -5  # Illegal Device Id
-LIBUM_INVALID_RESP = -6  # Illegal response received
+LIBUM_NO_ERROR = (0,)  # No error
+LIBUM_OS_ERROR = (-1,)  # Operating System level error
+LIBUM_NOT_OPEN = (-2,)  # Communication socket not open
+LIBUM_TIMEOUT = (-3,)  # Timeout occurred
+LIBUM_INVALID_ARG = (-4,)  # Illegal command argument
+LIBUM_INVALID_DEV = (-5,)  # Illegal Device Id
+LIBUM_INVALID_RESP = (-6,)  # Illegal response received
 
 
 class sockaddr_in(Structure):
@@ -145,17 +146,11 @@ class MoveRequest(object):
         dest4 = [d if d is not None else float("nan") for d in dest4]
 
         self.start_pos = self._read_position()
-        target = np.array(dest).astype(float)
-        if self.start_pos.shape != target.shape:
-            raise ValueError(
-                f"Is device #{self.dev} configured for the correct number of axes? {self.start_pos.shape} != {target.shape}"
-            )
-
         diff = [float(d - c) for d, c in zip(dest4, self.start_pos) if d != float("nan")]
         if linear:
             dist = max(1.0, np.linalg.norm(diff))
             speed = [max(1.0, speed * abs(d / dist)) for d in diff]
-            speed += [0] * (4 - len(speed))
+            speed = speed + [0] * (4 - len(speed))
         else:
             speed = [max(1.0, speed)] * 4  # speed < 1 crashes the uMp
 
@@ -245,10 +240,9 @@ class MoveRequest(object):
         return self._next_move_index < len(self._moves)
 
     def make_next_call(self):
-        try:
-            self.ump.call("um_goto_position_ext", *self._moves[self._next_move_index])
-        finally:
-            self._next_move_index += 1
+        print(*self._moves[self._next_move_index])
+        self.ump.call("um_goto_position_ext", *self._moves[self._next_move_index])
+        self._next_move_index += 1
 
 
 class UMError(Exception):
@@ -281,20 +275,10 @@ class UMP(object):
     _single = None
     _um_state = None
     _debug_at_cls = False
-    _default_group = LIBUM_DEF_GROUP
-    _default_address = LIBUM_DEF_BCAST_ADDRESS
 
     @classmethod
-    def set_library_path(cls, path: str):
+    def set_library_path(cls, path):
         cls._lib_path = path
-
-    @classmethod
-    def set_default_address(cls, address):
-        cls._default_address = address
-
-    @classmethod
-    def set_default_group(cls, group):
-        cls._default_group = group
 
     @classmethod
     def get_lib(cls):
@@ -333,9 +317,9 @@ class UMP(object):
         """Return a singleton UM instance.
         """
         if address is None:
-            address = cls._default_address
+            address = LIBUM_DEF_BCAST_ADDRESS
         if group is None:
-            group = cls._default_group
+            group = LIBUM_DEF_GROUP
         # question: can we have multiple UM instances with different address/group ?
         if cls._single is None:
             cls._single = UMP(address=address, group=group, start_poller=start_poller)
@@ -371,10 +355,10 @@ class UMP(object):
         version_str = self.sdk_version()
         version = tuple(map(int, version_str.lstrip(b"v").split(b".")))
 
-        if version < min_version:
-            raise RuntimeError(f"SDK version {min_version_str} or later required (your version is {version_str})")
-        if version > max_version:
-            raise RuntimeError(f"SDK version {max_version_str} or lower required (your version is {version_str})")
+        # if version < min_version:
+        #     raise RuntimeError(f"SDK version {min_version_str} or later required (your version is {version_str})")
+        # if version > max_version:
+        #     raise RuntimeError(f"SDK version {max_version_str} or lower required (your version is {version_str})")
 
         self.h = None
         self.open(address=address, group=group)
@@ -392,9 +376,6 @@ class UMP(object):
         self.poller = PollThread(self)
         if start_poller:
             self.poller.start()
-
-    def set_timeout(self, value: int):
-        self.h.timeout = c_int(value)
 
     @classmethod
     def set_debug_mode(cls, enabled: bool) -> None:
@@ -445,8 +426,6 @@ class UMP(object):
 
     def _start_pcap(self) -> None:
         """Start the pcap process"""
-        import psutil
-
         addr_parts = self.broadcast_address.split(".")
         addr_parts[-2] = "0"
         addr_parts[-1] = "0"
@@ -695,18 +674,6 @@ class UMP(object):
     def set_um_param(self, dev, param, value):
         return self.call("um_set_param", c_int(dev), c_int(param), value)
 
-    def run_um_cmd(self, dev_id, cmd, *args):
-        argv = (c_int * len(args))()
-        for i, x in enumerate(args):
-            argv[i] = x
-        self.call('um_cmd', c_int(dev_id), c_int(cmd), c_int(len(args)), byref(argv))
-
-    def restart_device(self, dev_id):
-        self.run_um_cmd(dev_id, 3)
-
-    def set_device_group(self, dev_id, group):
-        self.set_um_param(dev_id, 6, 55555 + group)
-
     def calibrate_zero_position(self, dev):
         self.call("um_init_zero", dev, X_AXIS | Y_AXIS | Z_AXIS | D_AXIS)
 
@@ -780,18 +747,10 @@ class UMP(object):
     #         self._write_debug(f"Ping scan could net reach {missing!r}")
 
     def get_firmware_version(self, dev_id):
-        """Return the firmware version installed on a device.
-        """
-        version = (c_int * 5)()
-        self.call("um_read_version", c_int(dev_id), byref(version), c_int(5))
-        return tuple(version)
-
-    def ping_device(self, dev_id):
-        """Ping a device. 
-
-        Returns after ping is received, or raises an exception on timeout.
-        """
-        self.call('um_ping', c_int(dev_id))
+        size = 10
+        version = (c_int * size)()
+        self.call("um_read_version", c_int(dev_id), byref(version), c_int(size))
+        return tuple([v for v in version])
 
 
 class SensapexDevice(object):
@@ -841,6 +800,21 @@ class SensapexDevice(object):
         return self.ump.goto_pos(
             self.dev_id, pos, speed, simultaneous=simultaneous, linear=linear, max_acceleration=max_acceleration
         )
+    
+    #modif
+    def take_step(self, steps, speed, max_acc):
+        command = [c_int(self.dev_id)]
+        command += [c_float(x) for x in steps]
+        #virtual axis
+        command += [c_float(float("nan"))]
+        command += [c_int(int(x)) for x in speed]
+        #virtual axis
+        command += [c_int(1000)]
+        # mode
+        command += [c_int(0)]
+        command += [c_int(max_acc)]
+        print(*command)
+        self.ump.call("um_take_step", *command)
 
     def is_busy(self):
         return self.ump.is_busy(self.dev_id)
@@ -993,3 +967,4 @@ class PollThread(threading.Thread):
                 print("Error in sensapex poll thread:")
                 sys.excepthook(*sys.exc_info())
                 time.sleep(1)
+

@@ -56,9 +56,9 @@ setup(
     license="MIT",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    name="sensapex",
+    name="sensapex_smooth",
     packages=find_packages(),
     python_requires=">=3.7",
-    url="https://github.com/sensapex/sensapex-py",
+    url="https://github.com/NeLy-EPFL/sensapex-py.git",
     version="1.022.3",  # in lock step with umsdk version
 )
